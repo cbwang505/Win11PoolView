@@ -2,6 +2,8 @@
 #include <winternl.h>
 #include <list>
 #include <iterator>
+#include <vector>
+#include <algorithm>
 #include "PoolData.h"
 
 using namespace std;
@@ -1271,6 +1273,7 @@ PrintInfoForVsSubsegment(
 		//
 		if (!SUCCEEDED(ReadData((ULONG64)chunkHeaderKernelAddress, g_vsChunkHeaderSize, chunkHeader)))
 		{
+			g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] ReadData chunkHeaderKernelAddress 0x%p\n", __FUNCTIONW__, __LINE__, chunkHeaderKernelAddress);
 			goto Exit;
 		}
 
@@ -1281,6 +1284,7 @@ PrintInfoForVsSubsegment(
 		headerBits = *(ULONG64*)(&vsChunkHeaderSizes + g_VsChunkHeaderSizeOffsets.HeaderBitsOffset);
 		if (headerBits == 0)
 		{
+			g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] headerBits 0 chunkHeaderKernelAddress 0x%p\n", __FUNCTIONW__, __LINE__, chunkHeaderKernelAddress);
 			goto Exit;
 		}
 
@@ -1294,6 +1298,8 @@ PrintInfoForVsSubsegment(
 		allocated = (BYTE)((*(ULONG64*)((ULONG64)&headerBits
 			+ g_VsChunkHeaderSizeOffsets.AllocatedOffset)) >> 16); /* bit position: 16 */
 
+
+	//	g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] PrintInfoForVsSubsegment %p\n", __FUNCTIONW__, __LINE__, chunkHeaderKernelAddress);
 		if (Address)
 		{
 			PrintInfoForVSAddress(chunkHeaderKernelAddress, unsafeSize, allocated, (ULONG64)Address, Allocations);
@@ -1379,7 +1385,7 @@ FindPoolBlocksInVsSubsegment(
 	chunkHeaderKernelAddress = (ULONG64)VsSubsegment + g_vsSubsegmentSize;
 	chunkHeaderKernelAddress = (ULONG64)ALIGN_UP_POINTER_BY((PVOID)chunkHeaderKernelAddress, 0x10);
 
-	PrintInfoForVsSubsegment(chunkHeaderKernelAddress, (ULONG_PTR)SubsegmentEnd - 0x1000, Address, Tag, Allocations);
+	PrintInfoForVsSubsegment(chunkHeaderKernelAddress, (ULONG_PTR)SubsegmentEnd, Address, Tag, Allocations);
 
 Exit:
 	return result;
@@ -1418,8 +1424,8 @@ GetDataForDescriptor(
 	BOOLEAN allocated;
 	ULONG64 descArrayEntry;
 	UCHAR unitSize;
-	ULONG64 segmentStart;
-	ULONG64 segmentEnd;
+	ULONG64 segmentStart = 0;
+	ULONG64 segmentEnd = 0;
 
 	result = S_OK;
 	//
@@ -1435,7 +1441,7 @@ GetDataForDescriptor(
 		ULONG64  SignaturePageSeg = *(ULONG64*)((ULONG64)HeapPageSeg + g_PageSegmentOffsets.SignatureOffset);
 		ULONG64  heapctx = (ULONG64)SegmentAddress ^ g_HeapKey ^ SignaturePageSeg;
 
-		if(heapctx==0)
+		if (heapctx == 0)
 		{
 			g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Invalid SegmentAddress Not Match %p %p \n", __FUNCTIONW__, __LINE__, heapctx, SegmentAddress);
 			return 1;
@@ -1497,12 +1503,15 @@ GetDataForDescriptor(
 
 
 		ctxsubsegblkaddr = subsegentry.Flink ^ SubsegmentListAddr;
-		ULONG64 AddressEnd=(ULONG64)Address + 0x2000;
+		ULONG64 AddressEnd = (ULONG64)SegmentAddress + 0x100000;
 		int fetchidx = 0;
+		int fetchidxvec = 0;
+		std::vector<ULONG64>::iterator it;
+		std::vector<ULONG64> segvec;
 		for (ULONG64 SubsegmentListtmp = ctxsubsegblkaddr; SubsegmentListtmp < AddressEnd; fetchidx++)
 		{
 
-			
+
 			LIST_ENTRY64 ctxsubsegblktmp = { 0 };
 			if (!SUCCEEDED(g_DataSpaces->ReadVirtual(SubsegmentListtmp, &ctxsubsegblktmp, sizeof(LIST_ENTRY64), nullptr)))
 			{
@@ -1511,12 +1520,10 @@ GetDataForDescriptor(
 
 				return 1;
 			}
-			g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] fetch SubsegmentList %p %p %p \n", __FUNCTIONW__, __LINE__, SubsegmentListtmp, ctxsubsegblktmp.Blink, ctxsubsegblktmp.Flink);
-			segmentStart = (ULONG_PTR)SubsegmentListtmp;
-			segmentEnd = (ULONG_PTR)((ULONG64)Address>> UnitShift<< UnitShift) + (2 << UnitShift);
+			//g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] fetch SubsegmentList %p %p %p \n", __FUNCTIONW__, __LINE__, SubsegmentListtmp, ctxsubsegblktmp.Blink, ctxsubsegblktmp.Flink);
 
 
-			
+
 
 
 			ctxsubsegblkaddr = ctxsubsegblktmp.Blink ^ SubsegmentListtmp;
@@ -1538,27 +1545,53 @@ GetDataForDescriptor(
 
 			}
 
-			ULONG64 SubsegmentListNext= ctxsubsegblktmp.Flink ^ SubsegmentListtmp;
-
-			if ((ULONG64)Address >= SubsegmentListtmp && (ULONG64)Address <= SubsegmentListNext)
+			it = std::find(segvec.begin(), segvec.end(), SubsegmentListtmp);
+			if (it == segvec.end())
 			{
-				g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] FindPoolBlocksInVsSubsegment  %p %p %p \n", __FUNCTIONW__, __LINE__, segmentStart, SubsegmentListNext, Address);
-				result = FindPoolBlocksInVsSubsegment(
-					(PVOID)segmentStart,
-					(PVOID)segmentEnd,
-					Allocations,
-					Address,
-					Tag);
-				break;
+				segvec.push_back(SubsegmentListtmp);
+				ULONG64 SubsegmentListNext = ctxsubsegblktmp.Flink ^ SubsegmentListtmp;
+
+
+				SubsegmentListtmp = SubsegmentListNext;
 			}
-			SubsegmentListtmp = SubsegmentListNext;
-			
+			else
+			{
+				break;
+
+			}
+
 		}
-		
+		std::sort(segvec.begin(), segvec.end());
 
 
-		
-		g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] fetchidx  %p %x \n", __FUNCTIONW__, __LINE__, Address, fetchidx);
+		for (it = segvec.begin(); it != segvec.end(); fetchidxvec++)
+		{
+			ULONG64 SubsegmentListtmp = *it;
+			it++;
+			if (it != segvec.end())
+			{
+				ULONG64 SubsegmentListNext = *it;
+
+				//g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] iterator  %p %p \n", __FUNCTIONW__, __LINE__, SubsegmentListtmp, SubsegmentListNext);
+				if ((ULONG64)Address >= SubsegmentListtmp && (ULONG64)Address <= SubsegmentListNext)
+				{
+
+					//g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] FindPoolBlocksInVsSubsegment  %p %p %p %p \n", __FUNCTIONW__, __LINE__, segmentStart, SubsegmentListNext, Address, segmentEnd);
+					segmentStart = (ULONG_PTR)SubsegmentListtmp;
+					segmentEnd = (ULONG_PTR)((ULONG64)Address >> UnitShift << UnitShift) + (2 << UnitShift);
+
+					result = FindPoolBlocksInVsSubsegment(
+						(PVOID)segmentStart,
+						(PVOID)segmentEnd,
+						Allocations,
+						Address,
+						Tag);
+					break;
+				}
+			}
+		}
+
+		g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Pool fetchidx  %p %x %x\n", __FUNCTIONW__, __LINE__, Address, fetchidx, fetchidxvec);
 		return 0;
 
 
