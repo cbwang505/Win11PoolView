@@ -130,6 +130,10 @@ struct HEAP_VS_CONTEXT_OFFSETS
 {
     ULONG SubsegmentListOffset;
 };
+struct HEAP_LFH_CONTEXT_OFFSETS
+{
+	ULONG BucketsOffset;
+};
 struct HEAP_SEG_CONTEXT_OFFSETS
 {
     ULONG SegmentListHeadOffset;
@@ -137,6 +141,7 @@ struct HEAP_SEG_CONTEXT_OFFSETS
     ULONG SegmentCountOffset;
     ULONG UnitShiftOffset;
     ULONG VsContextOffset;
+    ULONG LfhContextOffset;
 };
 
 struct HEAP_PAGE_SEGMENT_OFFSETS

@@ -43,6 +43,7 @@ RTL_SPARSE_ARRAY_OFFSETS g_RtlSparseArrayOffsets;
 HEAP_VAMGR_RANGE_OFFSETS g_VamgrRangeOffsets;
 HEAP_SEG_CONTEXT_OFFSETS g_SegContextOffsets;
 HEAP_VS_CONTEXT_OFFSETS g_HeapVsContext;
+HEAP_LFH_CONTEXT_OFFSETS g_HeapLfhContext;
 HEAP_PAGE_SEGMENT_OFFSETS g_PageSegmentOffsets;
 HEAP_PAGE_RANGE_DESCRIPTOR_OFFSET g_PageRangeDescriptorOffsets;
 SEGMENT_HEAP_OFFSETS g_SegmentHeapOffsets;
@@ -86,6 +87,8 @@ ULONG HEAP_LARGE_ALLOC_DATA;
 ULONG RTL_BALANCED_NODE;
 ULONG RTL_RB_TREE;
 ULONG HEAP_VS_CONTEXT;
+ULONG HEAP_LFH_CONTEXT;
+ULONG HEAP_LFH_BUCKET;
 
 //
 // Sizes
@@ -136,7 +139,9 @@ GetTypes(
 		(!SUCCEEDED(g_DebugSymbols->GetTypeId(g_KernBase, "_HEAP_LARGE_ALLOC_DATA", &HEAP_LARGE_ALLOC_DATA))) ||
 		(!SUCCEEDED(g_DebugSymbols->GetTypeId(g_KernBase, "_RTL_BALANCED_NODE", &RTL_BALANCED_NODE))) ||
 		(!SUCCEEDED(g_DebugSymbols->GetTypeId(g_KernBase, "_RTL_RB_TREE", &RTL_RB_TREE))) ||
-		(!SUCCEEDED(g_DebugSymbols->GetTypeId(g_KernBase, "_HEAP_VS_CONTEXT", &HEAP_VS_CONTEXT))))
+		(!SUCCEEDED(g_DebugSymbols->GetTypeId(g_KernBase, "_HEAP_VS_CONTEXT", &HEAP_VS_CONTEXT)))||
+		(!SUCCEEDED(g_DebugSymbols->GetTypeId(g_KernBase, "_HEAP_LFH_CONTEXT", &HEAP_LFH_CONTEXT)))||
+		(!SUCCEEDED(g_DebugSymbols->GetTypeId(g_KernBase, "_HEAP_LFH_BUCKET", &HEAP_LFH_BUCKET))))
 	{
 		return S_FALSE;
 	}
@@ -258,7 +263,9 @@ GetOffsets(
 		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_SEG_CONTEXT, "SegmentCount", &g_SegContextOffsets.SegmentCountOffset))) ||
 		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_SEG_CONTEXT, "UnitShift", &g_SegContextOffsets.UnitShiftOffset))) ||
 		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_SEG_CONTEXT, "VsContext", &g_SegContextOffsets.VsContextOffset))) ||
+		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_SEG_CONTEXT, "LfhContext", &g_SegContextOffsets.LfhContextOffset))) ||
 		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_VS_CONTEXT, "SubsegmentList", &g_HeapVsContext.SubsegmentListOffset))) ||
+		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_LFH_CONTEXT, "Buckets", &g_HeapLfhContext.BucketsOffset))) ||
 		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_PAGE_SEGMENT, "ListEntry", &g_PageSegmentOffsets.ListEntryOffset))) ||
 		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_PAGE_SEGMENT, "Signature", &g_PageSegmentOffsets.SignatureOffset))) ||
 		(!SUCCEEDED(g_DebugSymbols->GetFieldOffset(g_KernBase, HEAP_PAGE_SEGMENT, "DescArray", &g_PageSegmentOffsets.DescArrayOffset))) ||
@@ -560,7 +567,10 @@ HRESULT PrintInfoForSingleBlock(
 	std::string spaces;
 	std::string type;
 	result = S_OK;
-
+	if(Size==0)
+	{
+		return S_OK;
+	}
 	if (Tag && !Allocated)
 	{
 		//
@@ -675,7 +685,7 @@ HRESULT PrintInfoForSingleBlock(
 		allocation.Address,
 		allocation.Size,
 		spaces.c_str(),
-		allocation.Allocated ? "(Allocated)" : "(Free)     ",
+		Type == ALLOCATION_TYPE::Lfh? allocation.Allocated ? "(Free)" : "(Busy)":allocation.Allocated ? "(Allocated)" : "(Free)     ",
 		allocation.PoolTag.c_str(),
 		type.c_str());
 	if (Allocations)
@@ -1009,7 +1019,7 @@ FindPoolBlocksInLfhSubsegment(
 		&validBase,
 		&validSize);
 
-	if ((ULONG64)LfhSubsegment != validBase)
+	/*if ((ULONG64)LfhSubsegment != validBase)
 	{
 		result = S_FALSE;
 		goto Exit;
@@ -1018,7 +1028,7 @@ FindPoolBlocksInLfhSubsegment(
 	if ((ULONG64)SubsegmentEnd - (ULONG64)LfhSubsegment > validSize)
 	{
 		SubsegmentEnd = (PVOID)(validBase + validSize);
-	}
+	}*/
 
 	//
 	// Read the HEAP_PAGE_SUBSEGMENT encodedData.
@@ -1034,7 +1044,7 @@ FindPoolBlocksInLfhSubsegment(
 	// Decode encodedData and get BlockSize and FirstEntryOffset
 	// that we need to parse the subsegment.
 	//
-	lfhSubsegmentEncodedData = encodedData ^ (ULONG)g_LfhKey ^ ((ULONG)(ULONG_PTR)LfhSubsegment >> 0xc);
+	lfhSubsegmentEncodedData = encodedData ^ (ULONG)g_LfhKey ^ ((ULONG)((ULONG_PTR)LfhSubsegment >> 0xc));
 	lfhBlockSize = (lfhSubsegmentEncodedData + g_lfhSubsegmentEncodedEffsets.BlockSize) & 0x0000ffff;
 	lfhFirstEntryOffset = *((USHORT*)((ULONG64)&lfhSubsegmentEncodedData + g_lfhSubsegmentEncodedEffsets.FirstBlockOffset)) & 0xffff;
 
@@ -1080,7 +1090,8 @@ FindPoolBlocksInLfhSubsegment(
 				//
 				offsetInSubseg = currentAddress - lfhFirstEntryOffset - (ULONG64)LfhSubsegment;
 				indexInBitmap = (offsetInSubseg / lfhBlockSize) * 2;
-				bitmapResult = *(CHAR*)((ULONG64)bitmap + (indexInBitmap / 8));
+			//	bitmapResult = *(CHAR*)((ULONG64)bitmap + (indexInBitmap / 8));
+				bitmapResult = BitTest64((const LONG64 *)bitmap, indexInBitmap);
 
 				if (Address && (currentAddress > (ULONG64)ALIGN_UP_POINTER_BY(Address, 0x1000)))
 				{
@@ -1434,35 +1445,35 @@ GetDataForDescriptor(
 	descArrayEntry = (ULONG64)HeapPageSeg + g_PageSegmentOffsets.DescArrayOffset + (g_RangeDescriptorSize * CurrentDescriptorIndex);
 	ULONG64 descArrayEntryRaw = (ULONG64)SegmentAddress + g_PageSegmentOffsets.DescArrayOffset + (g_RangeDescriptorSize * CurrentDescriptorIndex);
 	unitSize = *(UCHAR*)(descArrayEntry + g_PageRangeDescriptorOffsets.UnitSizeOffset);
-	g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Unit size is %x %p %p %p %p\n", __FUNCTIONW__, __LINE__, unitSize, SegmentAddress, descArrayEntryRaw, CurrentDescriptorIndex, Address);
-	if (unitSize == 0)
+	rangeFlags = *(UCHAR*)(descArrayEntry + g_PageRangeDescriptorOffsets.RangeFlagsOffset);
+	g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Unit size %x %p %p %p %p\n", __FUNCTIONW__, __LINE__, unitSize, SegmentAddress, descArrayEntryRaw, CurrentDescriptorIndex, Address);
+	ULONG64  SignaturePageSeg = *(ULONG64*)((ULONG64)HeapPageSeg + g_PageSegmentOffsets.SignatureOffset);
+	ULONG64  heapctx = (ULONG64)SegmentAddress ^ g_HeapKey ^ SignaturePageSeg;
+
+	if (heapctx == 0)
 	{
+		g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Invalid SegmentAddress Not Match %p %p \n", __FUNCTIONW__, __LINE__, heapctx, SegmentAddress);
+		return 1;
+	}
+	ULONG64 VsContextOffsetAddr = heapctx + g_SegContextOffsets.VsContextOffset;
+	ULONG64 LfhContextOffsetAddr = heapctx + g_SegContextOffsets.LfhContextOffset;
 
-		ULONG64  SignaturePageSeg = *(ULONG64*)((ULONG64)HeapPageSeg + g_PageSegmentOffsets.SignatureOffset);
-		ULONG64  heapctx = (ULONG64)SegmentAddress ^ g_HeapKey ^ SignaturePageSeg;
+	ULONG64 VsContextObj = 0;
+	if (!SUCCEEDED(g_DataSpaces->ReadVirtual(VsContextOffsetAddr, &VsContextObj, 8, nullptr)))
+	{
+		g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] ReadVirtual VsContextOffsetAddr  %p \n", __FUNCTIONW__, __LINE__, VsContextOffsetAddr);
+		return 1;
+	}
+	ULONG64 LfhContextObj = 0;
+	if (!SUCCEEDED(g_DataSpaces->ReadVirtual(LfhContextOffsetAddr, &LfhContextObj, 8, nullptr)))
+	{
+		g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] ReadVirtual LfhContextOffsetAddr  %p \n", __FUNCTIONW__, __LINE__, VsContextOffsetAddr);
+		return 1;
+	}
+	g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Heap:=> dt _HEAP_SEG_CONTEXT  %p ;dt _HEAP_VS_CONTEXT %p ;dt _HEAP_LFH_CONTEXT %p\n", __FUNCTIONW__, __LINE__, heapctx, VsContextObj, LfhContextObj);
 
-		if (heapctx == 0)
-		{
-			g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Invalid SegmentAddress Not Match %p %p \n", __FUNCTIONW__, __LINE__, heapctx, SegmentAddress);
-			return 1;
-		}
-
-		ULONG64 VsContextOffsetAddr = heapctx + g_SegContextOffsets.VsContextOffset;
-
-		ULONG64 VsContextObj = 0;
-		if (!SUCCEEDED(g_DataSpaces->ReadVirtual(VsContextOffsetAddr, &VsContextObj, 8, nullptr)))
-		{
-			g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] ReadVirtual VsContextOffsetAddr  %p \n", __FUNCTIONW__, __LINE__, VsContextOffsetAddr);
-			return 1;
-		}
-
-
-		if (VsContextObj == 0)
-		{
-			g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] ReadVirtual VsContextOffsetAddr  zero \n", __FUNCTIONW__, __LINE__);
-
-			return 1;
-		}
+	if (unitSize == 0&& rangeFlags&1==0)
+	{		
 
 		LIST_ENTRY64 subsegentry = { 0 };
 		//ULONG64 SubsegmentListAddr = VsContextObj + g_HeapVsContext.SubsegmentListOffset;
@@ -1498,8 +1509,7 @@ GetDataForDescriptor(
 		}
 
 
-		g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Start heapctx  %p   VsContext  %p \n", __FUNCTIONW__, __LINE__, heapctx, VsContextObj);
-
+		
 
 
 		ctxsubsegblkaddr = subsegentry.Flink ^ SubsegmentListAddr;
@@ -1579,7 +1589,8 @@ GetDataForDescriptor(
 					//g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] FindPoolBlocksInVsSubsegment  %p %p %p %p \n", __FUNCTIONW__, __LINE__, segmentStart, SubsegmentListNext, Address, segmentEnd);
 					segmentStart = (ULONG_PTR)SubsegmentListtmp;
 					segmentEnd = (ULONG_PTR)((ULONG64)Address >> UnitShift << UnitShift) + (2 << UnitShift);
-
+					g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] dt _HEAP_VS_SUBSEGMENT %p \n", __FUNCTIONW__, __LINE__, segmentStart);
+					//g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] FindPoolBlocksInVsSubsegment  %p %p %p %p\n", __FUNCTIONW__, __LINE__, Address, SubsegmentListtmp, SubsegmentListNext, segmentEnd);
 					result = FindPoolBlocksInVsSubsegment(
 						(PVOID)segmentStart,
 						(PVOID)segmentEnd,
@@ -1597,7 +1608,7 @@ GetDataForDescriptor(
 
 		//return 1;
 	}
-	rangeFlags = *(UCHAR*)(descArrayEntry + g_PageRangeDescriptorOffsets.RangeFlagsOffset);
+
 
 	//
 	// Calculate the start and end addresses of this subsegment.
@@ -1614,14 +1625,62 @@ GetDataForDescriptor(
 	//
 	if (Address && (rangeFlags == 1))
 	{
-		return 0;
-		GetDataForDescriptor(SegmentAddress,
+		segmentEnd = ((ULONG64)Address & 0xfffffffffffff000) + 0x1000;
+		ULONG64 SubsegmentListAddr = ((ULONG64)Address & 0xfffffffffffff000) +0x1000;
+		while (SegmentAddress< SubsegmentListAddr)
+		{
+			LIST_ENTRY64 subsegentry = { 0 };
+
+			SubsegmentListAddr -= 0x1000;
+			if (!SUCCEEDED(g_DataSpaces->ReadVirtual(SubsegmentListAddr, &subsegentry, sizeof(LIST_ENTRY64), nullptr)))
+			{
+
+			//	g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] ReadVirtual SubsegmentListAddr  %p \n", __FUNCTIONW__, __LINE__, SubsegmentListAddr);
+
+				continue;
+			}
+
+
+			ULONG64   ctxsubsegblkaddr = subsegentry.Flink;
+
+			LIST_ENTRY64 ctxsubsegblk = { 0 };
+			if (!SUCCEEDED(g_DataSpaces->ReadVirtual(ctxsubsegblkaddr, &ctxsubsegblk, sizeof(LIST_ENTRY64), nullptr)))
+			{
+
+				//g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] ReadVirtual ctxsubsegblkaddr  %p \n", __FUNCTIONW__, __LINE__, ctxsubsegblkaddr);
+
+				continue;
+			}
+
+			if ((ULONG64)ctxsubsegblk.Blink != SubsegmentListAddr)
+			{
+
+				   g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] Decode ListEntry Failed %p %p %p %p \n", __FUNCTIONW__, __LINE__, ctxsubsegblkaddr, SubsegmentListAddr, ctxsubsegblk.Flink, ctxsubsegblk.Blink);
+					continue;
+
+			}
+
+			
+			
+			segmentStart = SubsegmentListAddr;
+			g_DebugControl->Output(DEBUG_OUTPUT_ERROR, "[%ws::%d] dt _HEAP_LFH_SUBSEGMENT  %p \n", __FUNCTIONW__, __LINE__, segmentStart);
+			
+			result = FindPoolBlocksInLfhSubsegment(
+				(PVOID)segmentStart,
+				(PVOID)segmentEnd,
+				Allocations,
+				Address,
+				Tag);
+			break;
+		}
+		/*GetDataForDescriptor(SegmentAddress,
 			HeapPageSeg,
 			CurrentDescriptorIndex - unitSize,
 			UnitShift,
 			Allocations,
 			Address,
-			Tag);
+			Tag);*/
+		return 0;
 	}
 	else if ((rangeFlags != 0) && (rangeFlags != 2))
 	{
