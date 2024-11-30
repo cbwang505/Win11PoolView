@@ -196,6 +196,7 @@ struct POOL_HEADER_OFFSETS
 struct HEAP_LFH_SUBSEGMENT_OFFSETS
 {
     ULONG BlockOffsets;
+    ULONG BlockCountOffsets;
     ULONG BlockBitmap;
 };
 
@@ -203,6 +204,7 @@ struct HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS_OFFSETS
 {
     ULONG EncodedData;
     ULONG BlockSize;
+  
     ULONG FirstBlockOffset;
 };
 
@@ -212,6 +214,21 @@ struct POOL_TRACKER_BIG_PAGES_OFFSETS
     ULONG Key;
     ULONG NumberOfBytes;
 };
+
+
+typedef struct _POOL_TRACKER_BIG_PAGES_BIG                                          // 6 / 6 elements; 0x0010 / 0x0018 Bytes
+{
+	UINT_PTR                    Va;                                             // 0x0000 / 0x0000; 0x0004 / 0x0008 Bytes
+	ULONG32                     Key;                                            // 0x0004 / 0x0008; 0x0004 / 0x0004 Bytes
+	struct                                                                      // 3 / 3 elements; 0x0004 / 0x0004 Bytes
+	{
+		ULONG32                 Pattern : 8; // 0x0008 / 0x000C; Bits:  0 -  7
+		ULONG32                 PoolType : 12; // 0x0008 / 0x000C; Bits:  8 - 19
+		ULONG32                 SlushSize : 12; // 0x0008 / 0x000C; Bits: 20 - 31
+	};
+	UINT_PTR                    NumberOfBytes;                                  // 0x000C / 0x0010; 0x0004 / 0x0008 Bytes
+	UINT_PTR                    pad;                                  // 0x000C / 0x0010; 0x0004 / 0x0008 Bytes
+} POOL_TRACKER_BIG_PAGESS_BIG, * PPOOL_TRACKER_BIG_PAGES;
 
 struct HEAP_LARGE_ALLOC_DATA_OFFSETS
 {
